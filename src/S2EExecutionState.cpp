@@ -1199,6 +1199,18 @@ void s2e_write_register_concrete(unsigned offset, uint8_t *buf, unsigned size) {
     g_s2e_state->regs()->write(offset, buf, size);
 }
 
+void s2e_read_register_symbolic(unsigned offset, uint8_t *buf, unsigned size) {
+    const klee::ConstraintManager& constraints = g_s2e_state->constraints;
+    auto solver = g_s2e->getExecutor()->getSolver(*g_s2e_state);
+    klee::ref<klee::ConstantExpr> out;
+
+    auto expr = g_s2e_state->regs()->read(offset, size);
+    klee::Query query(constraints, expr);
+    solver->getValue(query, out);
+    out->toMemory(buf);
+}
+
+
 uint8_t se_read_dirty_mask(uint64_t host_address) {
     return g_s2e_state->mem()->readDirtyMask(host_address);
 }
@@ -1294,6 +1306,50 @@ void s2e_write_ram_concrete(uint64_t host_address, const uint8_t *buf, uint64_t 
 #else
     memcpy((void *) host_address, buf, size);
 #endif
+}
+
+/* Return a concrete value of symbolic memory that satisfies the constraints, without concretizing the memory */
+void s2e_read_ram_symbolic(uint64_t host_address, void *buf, uint64_t size) {
+    auto expr_buf = new klee::ref<klee::Expr>[size];
+    auto te = s2e_get_ram_tlb_entry(host_address);
+
+    g_s2e_state->mem()->transferRam(te, host_address, expr_buf, size, false, false, true);
+
+    auto solver = g_s2e->getExecutor()->getSolver(*g_s2e_state);
+    auto constraints = g_s2e_state->constraints;
+    klee::ref<klee::ConstantExpr> out;
+
+    auto concat_expr = expr_buf[0];
+
+    for (uint64_t i = 1; i < size; i++) {
+        concat_expr = klee::ConcatExpr::create(expr_buf[i], concat_expr);
+    }
+
+    auto query = klee::Query(constraints, concat_expr);
+
+    solver->getValue(query, out);
+
+    if (size <= 8) {
+        out->toMemory(static_cast<uint8_t *>(buf));
+    } else {
+        unsigned cur_w;
+        for (uint64_t i = 0; i < size; i += cur_w) {
+
+            if (size - i >= 8)
+                cur_w = 8;
+            else if (size - i >= 4)
+                cur_w = 4;
+            else if (size - i >= 2)
+                cur_w = 2;
+            else
+                cur_w = 1;
+
+            auto extract_expr = out->Extract(8 * i, 8 * cur_w);
+            extract_expr->toMemory(static_cast<uint8_t *>(buf) + i);
+        }
+    }
+
+    delete[] expr_buf;
 }
 
 } // extern "C"
